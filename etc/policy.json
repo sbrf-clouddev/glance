@@ -2,6 +2,12 @@
     "context_is_admin":  "role:admin",
     "default": "role:admin",
 
+    "get_quotas": "",
+    "set_quotas": "role:admin",
+    "reset_quotas": "role:admin",
+    "get_quota_classes": "",
+    "set_quota_classes": "role:admin",
+
     "add_image": "",
     "delete_image": "",
     "get_image": "",

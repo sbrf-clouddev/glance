@@ -29,6 +29,7 @@ from glance.api import common
 from glance.api import policy
 from glance.common import exception
 from glance.common import location_strategy
+from glance.common import quota
 from glance.common import timeutils
 from glance.common import utils
 from glance.common import wsgi
@@ -180,7 +181,13 @@ class ImagesController(object):
                 change_method(req, image, change)
 
             if changes:
-                image_repo.save(image)
+                meta = quota.convert_proxy_to_metadata(image)
+                with quota.QuotaDriver.update(req.context, image_id, meta):
+                    image_repo.save(image)
+        except exception.ProjectQuotaFull as e:
+            raise webob.exc.HTTPForbidden(explanation=e,
+                                          request=req,
+                                          content_type='text/plain')
         except exception.NotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.msg)
         except (exception.Invalid, exception.BadStoreUri) as e:
@@ -264,9 +271,10 @@ class ImagesController(object):
     def delete(self, req, image_id):
         image_repo = self.gateway.get_repo(req.context)
         try:
-            image = image_repo.get(image_id)
-            image.delete()
-            image_repo.remove(image)
+            with quota.QuotaDriver.release(req.context, image_id):
+                image = image_repo.get(image_id)
+                image.delete()
+                image_repo.remove(image)
         except (glance_store.Forbidden, exception.Forbidden) as e:
             LOG.debug("User not permitted to delete image '%s'", image_id)
             raise webob.exc.HTTPForbidden(explanation=e.msg)

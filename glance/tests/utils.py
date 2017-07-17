@@ -25,6 +25,7 @@ import subprocess
 
 from alembic import command as alembic_command
 import fixtures
+import mock
 from oslo_config import cfg
 from oslo_config import fixture as cfg_fixture
 from oslo_log import log
@@ -83,6 +84,13 @@ class BaseTestCase(testtools.TestCase):
         self.conf_dir = os.path.join(self.test_dir, 'etc')
         utils.safe_mkdirs(self.conf_dir)
         self.set_policy()
+
+        self.quota_patcher = mock.patch('glance.common.quota.QuotaDriver')
+        self.quota_patcher.start()
+
+    def tearDown(self):
+        super(BaseTestCase, self).tearDown()
+        self.quota_patcher.stop()
 
     def set_policy(self):
         conf_file = "policy.json"

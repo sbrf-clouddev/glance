@@ -16,6 +16,7 @@
 
 from glance.api.v1 import images
 from glance.api.v1 import members
+from glance.api.v2 import quotas
 from glance.common import wsgi
 
 
@@ -105,5 +106,45 @@ class API(wsgi.Router):
         mapper.connect("/shared-images/{id}",
                        controller=members_resource,
                        action="index_shared_images")
+
+        quotas_resource = quotas.create_resource()
+        mapper.connect('/quota_classes',
+                       controller=quotas_resource,
+                       action='get_quota_classes',
+                       body_reject=True,
+                       conditions={'method': ['GET']})
+        mapper.connect('/quota_classes',
+                       controller=quotas_resource,
+                       action='set_quota_classes',
+                       conditions={'method': ['PUT']})
+        mapper.connect('/quota_classes',
+                       controller=reject_method_resource,
+                       action='reject',
+                       allowed_methods='GET, PUT')
+
+        mapper.connect('/quotas/{scope}',
+                       controller=quotas_resource,
+                       action='get_quotas',
+                       body_reject=True,
+                       conditions={'method': ['GET']})
+        mapper.connect('/quotas/{scope}',
+                       controller=quotas_resource,
+                       action='set_quotas',
+                       conditions={'method': ['PUT']})
+        mapper.connect('/quotas/{scope}',
+                       controller=quotas_resource,
+                       action='delete_quotas',
+                       body_reject=True,
+                       conditions={'method': ['DELETE']})
+        mapper.connect('/quotas/{scope}',
+                       controller=reject_method_resource,
+                       action='reject',
+                       allowed_methods='GET, PUT, DELETE')
+
+        mapper.connect('/quotas/{scope}/usage',
+                       controller=quotas_resource,
+                       action='quota_usage',
+                       body_reject=True,
+                       conditions={'method': ['GET']})
 
         super(API, self).__init__(mapper)

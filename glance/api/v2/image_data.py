@@ -24,6 +24,8 @@ import webob.exc
 
 import glance.api.policy
 from glance.common import exception
+from glance.common import quota
+from glance.common import store_utils
 from glance.common import trust_auth
 from glance.common import utils
 from glance.common import wsgi
@@ -132,27 +134,28 @@ class ImageDataController(object):
 
                 image_repo.save(image, from_state='queued')
                 image.set_data(data, size)
-
-                try:
-                    image_repo.save(image, from_state='saving')
-                except exception.NotAuthenticated:
-                    if refresher is not None:
-                        # request a new token to update an image in database
-                        cxt.auth_token = refresher.refresh_token()
-                        image_repo = self.gateway.get_repo(req.context)
+                meta = quota.convert_proxy_to_metadata(image)
+                with quota.QuotaDriver.activate(req.context, image_id, meta):
+                    try:
                         image_repo.save(image, from_state='saving')
-                    else:
-                        raise
+                    except exception.NotAuthenticated:
+                        if refresher is not None:
+                            # request a new token to update an image in DB
+                            cxt.auth_token = refresher.refresh_token()
+                            image_repo = self.gateway.get_repo(req.context)
+                            image_repo.save(image, from_state='saving')
+                        else:
+                            raise
 
-                try:
-                    # release resources required for re-auth
-                    if refresher is not None:
-                        refresher.release_resources()
-                except Exception as e:
-                    LOG.info(_LI("Unable to delete trust %(trust)s: %(msg)s"),
-                             {"trust": refresher.trust_id,
-                              "msg": encodeutils.exception_to_unicode(e)})
-
+                    try:
+                        # release resources required for re-auth
+                        if refresher is not None:
+                            refresher.release_resources()
+                    except Exception as e:
+                        LOG.info(_LI("Unable to delete trust %(trust)s: "
+                                     "%(msg)s"),
+                                 {"trust": refresher.trust_id,
+                                  "msg": encodeutils.exception_to_unicode(e)})
             except (glance_store.NotFound,
                     exception.ImageNotFound,
                     exception.Conflict):
@@ -183,6 +186,16 @@ class ImageDataController(object):
                 raise webob.exc.HTTPUnauthorized(explanation=msg,
                                                  request=req,
                                                  content_type='text/plain')
+        except exception.ProjectQuotaFull as e:
+                LOG.info(_LI('Cleaning up %s after exceeding the quota.'),
+                         image.image_id)
+                store_utils.safe_delete_from_backend(
+                    req.context, image.image_id, image.locations[0])
+                image = image_repo.get(image_id)
+                self._restore(image_repo, image)
+                raise webob.exc.HTTPForbidden(explanation=e,
+                                              request=req,
+                                              content_type='text/plain')
         except ValueError as e:
             LOG.debug("Cannot save data for image %(id)s: %(e)s",
                       {'id': image_id,
@@ -190,7 +203,6 @@ class ImageDataController(object):
             self._restore(image_repo, image)
             raise webob.exc.HTTPBadRequest(
                 explanation=encodeutils.exception_to_unicode(e))
-
         except glance_store.StoreAddDisabled:
             msg = _("Error in store configuration. Adding images to store "
                     "is disabled.")

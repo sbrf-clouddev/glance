@@ -319,6 +319,7 @@ class ApiServer(Server):
         self.store_type_location_strategy_preference = ""
 
         self.send_identity_headers = False
+        self.disable_keystone_quota_requests = True
 
         self.conf_base = """[DEFAULT]
 debug = %(debug)s
@@ -357,6 +358,7 @@ image_tag_quota=%(image_tag_quota)s
 image_location_quota=%(image_location_quota)s
 location_strategy=%(location_strategy)s
 allow_additional_image_properties = True
+disable_keystone_quota_requests=%(disable_keystone_quota_requests)s
 [oslo_policy]
 policy_file = %(policy_file)s
 policy_default_rule = %(policy_default_rule)s
@@ -475,6 +477,7 @@ class RegistryServer(Server):
         self.policy_file = policy_file
         self.policy_default_rule = 'default'
         self.disable_path = None
+        self.disable_keystone_quota_requests = True
 
         self.conf_base = """[DEFAULT]
 debug = %(debug)s
@@ -490,6 +493,7 @@ enable_v2_registry = %(enable_v2_registry)s
 workers = %(workers)s
 user_storage_quota = %(user_storage_quota)s
 metadata_encryption_key = %(metadata_encryption_key)s
+disable_keystone_quota_requests = %(disable_keystone_quota_requests)s
 [oslo_policy]
 policy_file = %(policy_file)s
 policy_default_rule = %(policy_default_rule)s

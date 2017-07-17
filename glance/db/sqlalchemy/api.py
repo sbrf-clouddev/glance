@@ -22,6 +22,7 @@
 """Defines interface for DB access."""
 
 import datetime
+import sys
 import threading
 
 from oslo_config import cfg
@@ -36,7 +37,7 @@ import six
 from six.moves import range
 import sqlalchemy
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy import MetaData, Table
+from sqlalchemy import MetaData, Table, or_, func
 import sqlalchemy.orm as sa_orm
 from sqlalchemy import sql
 import sqlalchemy.sql as sa_sql
@@ -769,7 +770,6 @@ def _image_update(context, values, image_id, purge_props=False,
 
     # NOTE(jbresnah) values is altered in this so a copy is needed
     values = values.copy()
-
     session = get_session()
     with session.begin():
 
@@ -1296,7 +1296,9 @@ def purge_deleted_rows(context, age_in_days, max_rows, session=None):
     for model_class in models.__dict__.values():
         if not hasattr(model_class, '__tablename__'):
             continue
-        if hasattr(model_class, 'deleted'):
+
+        if (hasattr(model_class, 'deleted') and
+           model_class.__tablename__ != 'quota_classes'):
             tables.append(model_class.__tablename__)
     # get rid of FK constraints
     for tbl in ('images', 'tasks'):
@@ -1878,3 +1880,200 @@ def metadef_tag_count(context, namespace_name, session=None):
     """Get count of tags for a namespace, raise if ns doesn't exist."""
     session = session or get_session()
     return metadef_tag_api.count(context, namespace_name, session)
+
+
+def quota_classes_get(context, session=None):
+    """Return quota values for all classes."""
+
+    session = session or get_session()
+    q_refs = session.query(models.QuotaClass).all()
+    return {q['name']: q['default_limit'] for q in q_refs}
+
+
+def quota_classes_set(context, quota_classes):
+    """Set default values for quota classes."""
+
+    session = get_session()
+    with session.begin():
+        for name, def_limit in six.iteritems(quota_classes):
+            q_class_ref = session.query(models.QuotaClass).filter_by(
+                name=name).first()
+            q_class_ref.update({'default_limit': def_limit})
+            q_class_ref.save(session=session)
+
+    return quota_classes
+
+
+def quotas_get(context, scope, session=None):
+    """Get quotas for scope(project or domain) if present"""
+    session = session or get_session()
+    result = {}
+    for q in session.query(models.Quota).filter_by(scope=scope).all():
+        result[q.quota_class] = q.hard_limit
+    return result
+
+
+def quotas_get_defaults(context, parent_scope=None, session=None):
+    """Get quotas for scope(project or domain) if present"""
+    session = session or get_session()
+    result = quota_classes_get(context)
+    if parent_scope:
+        for q in session.query(models.Quota).filter_by(
+                scope=parent_scope).all():
+            lm = q.hard_limit
+            if lm != -1 and (lm < result[q.quota_class] or
+                             result[q.quota_class] == -1):
+                result[q.quota_class] = lm
+    return result
+
+
+def quotas_set(context, scope, quota_values):
+    """Set quota values for scope"""
+    session = get_session()
+    with session.begin():
+        for name, value in six.iteritems(quota_values):
+            q_ref = session.query(models.Quota).filter_by(
+                scope=scope, quota_class=name).first()
+            if not q_ref:
+                q_ref = models.Quota()
+
+            q_ref.update({
+                'quota_class': name,
+                'hard_limit': value,
+                'scope': scope
+            })
+            q_ref.save(session=session)
+
+    return quota_values
+
+
+def quotas_reset(context, scope):
+    session = get_session()
+    with session.begin():
+        q_ref = session.query(models.Quota).filter_by(scope=scope).all()
+        for q in q_ref:
+            session.delete(q)
+
+
+def quota_get_usage(context, scope, session=None):
+    session = session or get_session()
+    occupied = (
+        session.query(models.Reservation.scope,
+                      models.Reservation.quota_class,
+                      func.sum(models.Reservation.reserved).label('total')).
+        filter(models.Reservation.scope == scope,
+               or_(models.Reservation.expire == None,
+                   timeutils.utcnow() < models.Reservation.expire)).
+        group_by(models.Reservation.scope,
+                 models.Reservation.quota_class)).all()
+    if occupied:
+        return {o[1]: int(o[2]) for o in occupied}
+    else:
+        return {}
+
+
+def quota_create_reservations(context, image_id, scope, reservations,
+                              limits):
+    session = get_session()
+    result = []
+    with session.begin():
+        # if no quotas specified we need to create them cause
+        # it allows to avoid recalc when smd edit defaults
+        for quota_class, reserved in six.iteritems(reservations):
+            # create reservation first
+            res_ref = models.Reservation()
+            res_ref.update({
+                'quota_class': quota_class,
+                'scope': scope,
+                'image_id': image_id
+            })
+            session.add(res_ref)
+            # try to update reservation if we have free space
+            limit = limits[quota_class]
+            if limit == -1:
+                limit = getattr(sys, 'maxint', sys.maxsize)
+            else:
+                limit = limit - reserved
+
+            # we calculate usage for class only to reduce possibility of
+            # race conditions
+            cur_limit = quota_get_usage_by_class(context, scope, quota_class,
+                                                 session=session)
+            if cur_limit <= limit:
+                res_ref.update({'reserved': reserved})
+                res_ref.save(session=session)
+                # update reservation with complex condition finally
+                result.append(res_ref.id)
+            else:
+                # otherwise something happened we need to clear our reservation
+                # and stop upload/download
+                raise exception.ProjectQuotaFull(
+                    quota=quota_class, current=(cur_limit + reserved),
+                    allowed=limits[quota_class])
+    return result
+
+
+def quota_get_usage_by_class(context, scope, quota_class, session=None):
+    session = session or get_session()
+    occupied = (
+        session.query(func.sum(models.Reservation.reserved).label('total')).
+        filter(models.Reservation.scope == scope,
+               models.Reservation.quota_class == quota_class,
+               or_(models.Reservation.expire == None,
+                   timeutils.utcnow() < models.Reservation.expire)).
+        group_by(models.Reservation.scope,
+                 models.Reservation.quota_class)).first()
+    if occupied:
+        return int(occupied[0])
+    else:
+        return 0
+
+
+@retry(retry_on_exception=_retry_on_deadlock, wait_fixed=500,
+       stop_max_attempt_number=50)
+def quota_commit_reservations(context, reservation_list):
+    # check reservations was not expired or finished already
+    # update reservations to status = reserved
+    session = get_session()
+    with session.begin():
+        for reservation_id in reservation_list:
+            res_ref = session.query(models.Reservation).filter_by(
+                id=reservation_id).one()
+
+            if timeutils.utcnow() > res_ref.expire:
+                raise exception.Conflict(_("Quota reservation %s expired"
+                                           "before resource occupied quota.") %
+                                         reservation_id)
+            res_ref.update({'expire': None})
+            res_ref.save(session=session)
+
+
+@retry(retry_on_exception=_retry_on_deadlock, wait_fixed=500,
+       stop_max_attempt_number=50)
+def quota_delete_reservations(context, reservation_list):
+    session = get_session()
+    with session.begin():
+        for reservation_id in reservation_list:
+            res_ref = session.query(models.Reservation).filter_by(
+                id=reservation_id).first()
+            if res_ref:
+                session.delete(res_ref)
+
+
+@retry(retry_on_exception=_retry_on_deadlock, wait_fixed=500,
+       stop_max_attempt_number=50)
+def quota_clear_reservations(context, image_id):
+    # acquire reservation with specific class for image
+    session = get_session()
+    with session.begin():
+        res_ref = session.query(models.Reservation).filter_by(
+            image_id=image_id).all()
+        for res in res_ref:
+            session.delete(res)
+
+
+def quota_get_reservartions(context, image_id, session=None):
+    session = session or get_session()
+    res_ref = session.query(models.Reservation).filter_by(
+        image_id=image_id).all()
+    return [res.id for res in res_ref]

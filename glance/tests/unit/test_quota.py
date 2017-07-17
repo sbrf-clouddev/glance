@@ -41,6 +41,7 @@ class FakeImage(object):
     image_id = 'someid'
     locations = [{'url': 'file:///not/a/path', 'metadata': {}}]
     tags = set([])
+    status = 'active'
 
     def set_data(self, data, size=None):
         self.size = 0

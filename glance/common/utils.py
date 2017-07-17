@@ -33,6 +33,10 @@ import os
 import re
 import uuid
 
+from keystoneauth1.loading import conf
+from keystoneauth1.loading import session
+from keystoneclient import exceptions as ks_exceptions
+from keystoneclient.v3 import client as ks_client
 from OpenSSL import crypto
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -672,3 +676,92 @@ def evaluate_filter_op(value, operator, threshold):
 
     msg = _("Unable to filter on a unknown operator.")
     raise exception.InvalidFilterOperatorValue(msg)
+
+
+quota_opts = [
+    cfg.BoolOpt('disable_domain_quota_validation',
+                help=_('Disable validation if domain exists in Keystone when '
+                       'specifying domain quotas. '
+                       'In case this opt has "false" value, service user '
+                       'that is used for running glance should have rights '
+                       'to "get" and "list" Keystone Domains and Projects.'),
+                default=True),
+    cfg.BoolOpt('disable_keystone_quota_requests',
+                help=_('Disable requests to keystone when creating quotas. '
+                       'This option is needed only for testing puproses.'),
+                default=False),
+]
+
+CONF.register_opts(quota_opts)
+
+
+class ProjectUtils(object):
+
+    @classmethod
+    def _keystone_client(cls):
+        if not hasattr(cls, '_client'):
+            trustee_user_auth = conf.load_from_conf_options(
+                CONF, 'keystone_authtoken')
+            ssl_settings = {
+                'cacert': CONF.keystone_authtoken.cafile,
+                'insecure': CONF.keystone_authtoken.insecure,
+                'cert': CONF.keystone_authtoken.certfile,
+                'key': CONF.keystone_authtoken.keyfile,
+            }
+            sess = session.Session().load_from_options(auth=trustee_user_auth,
+                                                       **ssl_settings)
+            cls._client = ks_client.Client(session=sess)
+        return cls._client
+
+    @classmethod
+    def get_domain(cls, project):
+        """Get parent domain for project"""
+        if CONF.disable_keystone_quota_requests:
+            if project == 'default':
+                return None
+            else:
+                return 'default'
+
+        try:
+            return cls._keystone_client().projects.get(project).domain_id
+        except ks_exceptions.Forbidden as e:
+            raise exc.HTTPForbidden(explanation=e)
+        except ks_exceptions.Unauthorized as e:
+            raise exc.HTTPUnauthorized(explanation=e)
+        except ks_exceptions.BadRequest as e:
+            raise exc.HTTPBadRequest(explanation=e)
+        except ks_exceptions.NotFound:
+            return None
+
+    @classmethod
+    def is_domain(cls, domain):
+        if (CONF.disable_domain_quota_validation or
+                CONF.disable_keystone_quota_requests):
+            return True
+
+        try:
+            cls._keystone_client().domains.get(domain)
+        except ks_exceptions.NotFound:
+            return False
+        except ks_exceptions.Forbidden as e:
+            raise exc.HTTPForbidden(explanation=e)
+        except ks_exceptions.Unauthorized as e:
+            raise exc.HTTPUnauthorized(explanation=e)
+        except ks_exceptions.BadRequest as e:
+            raise exc.HTTPBadRequest(explanation=e)
+
+        return True
+
+    @classmethod
+    def get_projects(cls, domain):
+        if CONF.disable_keystone_quota_requests:
+            return []
+
+        try:
+            return cls._keystone_client().projects.list(domain=domain)
+        except ks_exceptions.Forbidden as e:
+            raise exc.HTTPForbidden(explanation=e)
+        except ks_exceptions.Unauthorized as e:
+            raise exc.HTTPUnauthorized(explanation=e)
+        except ks_exceptions.BadRequest as e:
+            raise exc.HTTPBadRequest(explanation=e)

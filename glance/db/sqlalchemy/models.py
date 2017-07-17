@@ -18,6 +18,7 @@
 SQLAlchemy models for glance data
 """
 
+import datetime
 import uuid
 
 from oslo_db.sqlalchemy import models
@@ -210,6 +211,57 @@ class ImageMember(BASE, GlanceBase):
     can_share = Column(Boolean, nullable=False, default=False)
     status = Column(String(20), nullable=False, default="pending",
                     server_default='pending')
+
+
+class QuotaClass(BASE, GlanceBase):
+    __tablename__ = 'quota_classes'
+
+    name = Column(String(255), primary_key=True)
+    default_limit = Column(BigInteger().with_variant(Integer, "sqlite"),
+                           nullable=False)
+
+
+class Quota(BASE, GlanceBase):
+    __tablename__ = 'quotas'
+    __table_args__ = (Index('ix_quota_scope', 'scope'),
+                      Index('ix_quota_class', 'quota_class'),
+                      UniqueConstraint('scope',
+                                       'quota_class',
+                                       name='quota_must_be_unique_per_scope'))
+
+    id = Column(String(36), primary_key=True,
+                default=lambda: str(uuid.uuid4()))
+    scope = Column(String(255), nullable=False)
+    quota_class = Column(String(255), ForeignKey('quota_classes.name'),
+                         nullable=False)
+    hard_limit = Column(BigInteger().with_variant(Integer, "sqlite"),
+                        nullable=False)
+    quota_class_rel = relationship("QuotaClass")
+
+
+class Reservation(BASE, GlanceBase):
+    __tablename__ = 'reservations'
+    __table_args__ = (Index('ix_reservation_class', 'quota_class'),
+                      Index('ix_reservation_image', 'image_id'),
+                      Index('ix_reservation_scope', 'scope'),
+                      Index('ix_reservation_expire', 'expire'),
+                      UniqueConstraint('quota_class',
+                                       'image_id',
+                                       'scope',
+                                       'expire',
+                                       name='quota_unique_per_image'))
+
+    id = Column(String(36), primary_key=True,
+                default=lambda: str(uuid.uuid4()))
+    reserved = Column(BigInteger().with_variant(Integer, "sqlite"),
+                      nullable=False, default=0)
+    quota_class = Column(String(255), ForeignKey('quota_classes.name'),
+                         nullable=False)
+    scope = Column(String(255), nullable=False)
+    expire = Column(
+        DateTime,
+        default=lambda: timeutils.utcnow() + datetime.timedelta(hours=5))
+    image_id = Column(String(36), nullable=False)
 
 
 class Task(BASE, GlanceBase):

@@ -87,6 +87,11 @@ class Conflict(GlanceException):
                 "operated on.")
 
 
+class ProjectQuotaFull(GlanceException):
+    message = _("Quota value %(current)s for %(quota)s "
+                "exceed maximal allowed value %(allowed)s.")
+
+
 class StorageQuotaFull(GlanceException):
     message = _("The size of the data %(image_size)s will exceed the limit. "
                 "%(remaining)s bytes remaining.")

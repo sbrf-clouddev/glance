@@ -45,6 +45,7 @@ from glance.api.v1 import filters
 from glance.api.v1 import upload_utils
 from glance.common import exception
 from glance.common import property_utils
+from glance.common import quota
 from glance.common import store_utils
 from glance.common import timeutils
 from glance.common import utils
@@ -693,7 +694,8 @@ class Controller(controller.BaseController):
 
         return location_data
 
-    def _activate(self, req, image_id, location_data, from_state=None):
+    def _activate(self, req, image_id, location_data, image_info,
+                  from_state=None):
         """
         Sets the image status to `active` and the image's location
         attribute.
@@ -710,13 +712,19 @@ class Controller(controller.BaseController):
 
         try:
             s = from_state
-            image_meta_data = registry.update_image_metadata(req.context,
-                                                             image_id,
-                                                             image_meta,
-                                                             from_state=s)
+            meta_for_quota = dict(image_info)
+            meta_for_quota['location'] = location_data
+            with quota.QuotaDriver.activate(req.context, image_id,
+                                            meta_for_quota):
+                image_meta_data = registry.update_image_metadata(
+                    req.context, image_id, image_meta, from_state=s)
+
             self.notifier.info("image.activate", redact_loc(image_meta_data))
             self.notifier.info("image.update", redact_loc(image_meta_data))
             return image_meta_data
+        except exception.ProjectQuotaFull as e:
+            raise HTTPForbidden(explanation=e,
+                                request=req)
         except exception.Duplicate:
             with excutils.save_and_reraise_exception():
                 # Delete image data since it has been superseded by another
@@ -754,13 +762,15 @@ class Controller(controller.BaseController):
                 image_meta = self._activate(req,
                                             image_id,
                                             location_data,
+                                            image_info=image_meta,
                                             from_state='saving')
             except exception.Duplicate:
                 raise
             except Exception:
                 with excutils.save_and_reraise_exception():
-                    # NOTE(zhiyan): Delete image data since it has already
-                    # been added to store by above _upload() call.
+                    # NOTE(zhiyan): Delete image data since it has
+                    # already been added to store by above _upload()
+                    # call.
                     LOG.warn(_LW("Failed to activate image %s in "
                                  "registry. About to delete image "
                                  "bits from store and update status "
@@ -844,7 +854,8 @@ class Controller(controller.BaseController):
                                            content_type="text/plain")
                 location_data = {'url': location, 'metadata': {},
                                  'status': 'active'}
-                image_meta = self._activate(req, image_id, location_data)
+                image_meta = self._activate(req, image_id, location_data,
+                                            image_info=image_meta)
         return image_meta
 
     def _validate_image_for_activation(self, req, id, values):
@@ -1056,16 +1067,21 @@ class Controller(controller.BaseController):
             if location:
                 image_meta['size'] = self._get_size(req.context, image_meta,
                                                     location)
-
-            image_meta = registry.update_image_metadata(req.context,
-                                                        id,
-                                                        image_meta,
-                                                        purge_props)
+            image_info = dict(orig_image_meta)
+            image_info.update(image_meta)
+            if location:
+                image_info['location'] = location
+            with quota.QuotaDriver.update(req.context, id, image_info):
+                image_meta = registry.update_image_metadata(
+                    req.context, id, image_meta, purge_props)
 
             if activating:
                 image_meta = self._handle_source(req, id, image_meta,
                                                  image_data)
 
+        except exception.ProjectQuotaFull as e:
+            raise HTTPForbidden(explanation=e,
+                                request=req)
         except exception.Invalid as e:
             msg = (_("Failed to update image metadata. Got error: %s") %
                    encodeutils.exception_to_unicode(e))
@@ -1166,8 +1182,9 @@ class Controller(controller.BaseController):
                 with excutils.save_and_reraise_exception():
                     registry.update_image_metadata(req.context, id,
                                                    {'status': ori_status})
+            with quota.QuotaDriver.release(req.context, id):
+                registry.delete_image_metadata(req.context, id)
 
-            registry.delete_image_metadata(req.context, id)
         except exception.ImageNotFound as e:
             msg = (_("Failed to find image to delete: %s") %
                    encodeutils.exception_to_unicode(e))
